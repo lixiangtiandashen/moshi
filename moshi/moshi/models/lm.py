@@ -358,6 +358,10 @@ class LMModel(StreamingContainer):
         assert logits.dim() == 4, logits.shape  # [B, Ka, S, card]
         return logits
 
+    # 添加 forward 方法
+    def forward(self, sequence: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_text(sequence)
+
 
 @dataclass
 class _LMGenState:
