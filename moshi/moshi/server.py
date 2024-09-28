@@ -12,6 +12,7 @@ import tarfile
 import time
 import secrets
 import sys
+import logging
 
 import aiohttp
 from aiohttp import web
@@ -20,7 +21,8 @@ import numpy as np
 import sentencepiece
 import sphn
 import torch
-
+from torch.utils.tensorboard import SummaryWriter
+from torchviz import make_dot
 
 from .client_utils import make_log
 from .models import loaders, MimiModel, LMModel, LMGen
@@ -167,7 +169,7 @@ class ServerState:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Moshi Server")
     parser.add_argument("--host", default="localhost", type=str)
     parser.add_argument("--port", default=8998, type=int)
     parser.add_argument("--static", type=str)
@@ -190,7 +192,28 @@ def main():
             "that contains valid key.pem and cert.pem files"
         )
     )
-
+    parser.add_argument(
+        '--enable-tensorboard',
+        action='store_true',
+        help='是否启用 TensorBoard 可视化'
+    )
+    parser.add_argument(
+        '--enable-torchviz',
+        action='store_true',
+        help='是否启用 torchviz 计算图可视化'
+    )
+    parser.add_argument(
+        '--tensorboard-logdir',
+        type=str,
+        default='logs/moshi_tensorboard',
+        help='TensorBoard 日志目录路径'
+    )
+    parser.add_argument(
+        '--torchviz-output',
+        type=str,
+        default='moshi_computational_graph',
+        help='torchviz 输出文件的前缀名'
+    )
     args = parser.parse_args()
     seed_all(42424242)
 
@@ -200,8 +223,7 @@ def main():
         try:
             from gradio import networking  # type: ignore
         except ImportError:
-            log("error", "Cannot find gradio which is required to activate a tunnel. "
-                         "Please install with `pip install gradio`.")
+            log("error", "无法找到 gradio，启用隧道需要安装 gradio。请运行 `pip install gradio`。")
             sys.exit(1)
         setup_tunnel = networking.setup_tunnel
         if args.gradio_tunnel_token is None:
@@ -209,30 +231,45 @@ def main():
         else:
             tunnel_token = args.gradio_tunnel_token
 
-    log("info", "loading mimi")
+    log("info", "加载 Mimi 模型")
     if args.mimi_weight is None:
         args.mimi_weight = hf_hub_download(args.hf_repo, loaders.MIMI_NAME)
     mimi = loaders.get_mimi(args.mimi_weight, args.device)
-    log("info", "mimi loaded")
+    log("info", "Mimi 模型加载完成")
 
     if args.tokenizer is None:
         args.tokenizer = hf_hub_download(args.hf_repo, loaders.TEXT_TOKENIZER_NAME)
     text_tokenizer = sentencepiece.SentencePieceProcessor(args.tokenizer)  # type: ignore
 
-    log("info", "loading moshi")
+    log("info", "加载 Moshi 模型")
     if args.moshi_weight is None:
         args.moshi_weight = hf_hub_download(args.hf_repo, loaders.MOSHI_NAME)
     lm = loaders.get_moshi_lm(args.moshi_weight, args.device)
-    log("info", "moshi loaded")
+    log("info", "Moshi 模型加载完成")
+
+    # 初始化 SummaryWriter
+    writer = None
+    if args.enable_tensorboard:
+        writer = SummaryWriter(log_dir=args.tensorboard_logdir)
+        log("info", f"TensorBoard 已启用，日志路径: {args.tensorboard_logdir}")
+        # 将模型结构写入 TensorBoard
+        dummy_input = torch.randn(1, 8, 1920).to(args.device)
+        writer.add_graph(lm, dummy_input)
+        writer.flush()
+
+    # 设置 torchviz 开关
+    if args.enable_torchviz:
+        lm.visualize_torchviz = True
+        log("info", "torchviz 已启用")
 
     state = ServerState(mimi, text_tokenizer, lm, args.device)
-    log("info", "warming up the model")
+    log("info", "对模型进行预热")
     state.warmup()
     app = web.Application()
     app.router.add_get("/api/chat", state.handle_chat)
     static_path: None | str = None
     if args.static is None:
-        log("info", "retrieving the static content")
+        log("info", "检索静态内容")
         dist_tgz = hf_hub_download("kyutai/moshi-artifacts", "dist.tgz")
         dist_tgz = Path(dist_tgz)
         dist = dist_tgz.parent / "dist"
@@ -241,13 +278,13 @@ def main():
                 tar.extractall(path=dist_tgz.parent)
         static_path = str(dist)
     elif args.static != "none":
-        # When set to the "none" string, we don't serve any static content.
+        # 当设置为 "none" 字符串时，不提供任何静态内容。
         static_path = args.static
     if static_path is not None:
         async def handle_root(_):
             return web.FileResponse(os.path.join(static_path, "index.html"))
 
-        log("info", f"serving static content from {static_path}")
+        log("info", f"从 {static_path} 提供静态内容")
         app.router.add_get("/", handle_root)
         app.router.add_static(
             "/", path=static_path, follow_symlinks=True, name="static"
@@ -263,13 +300,17 @@ def main():
         ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
         protocol = "https"
 
-    log("info", f"Access the Web UI directly at {protocol}://{args.host}:{args.port}")
+    log("info", f"直接通过 {protocol}://{args.host}:{args.port} 访问 Web UI")
     if setup_tunnel is not None:
         tunnel = setup_tunnel('localhost', args.port, tunnel_token, None)
-        log("info", f"Tunnel started, if executing on a remote GPU, you can use {tunnel}.")
-        log("info", "Note that this tunnel goes through the US and you might experience high latency in Europe.")
+        log("info", f"隧道已启动，如果在远程 GPU 上运行，可以使用 {tunnel}。")
+        log("info", "注意，该隧道通过美国服务器，欧洲地区可能会有较高的延迟。")
     web.run_app(app, port=args.port, ssl_context=ssl_context)
 
+    # 关闭 TensorBoard 写入器
+    if writer is not None:
+        writer.close()
 
-with torch.no_grad():
-    main()
+if __name__ == "__main__":
+    with torch.no_grad():
+        main()

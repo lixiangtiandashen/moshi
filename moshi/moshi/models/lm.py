@@ -12,9 +12,11 @@ from dataclasses import dataclass
 from functools import partial
 import logging
 import typing as tp
+from datetime import datetime
 
 import torch
 from torch import nn
+from torchviz import make_dot
 
 from ..utils.sampling import sample_token
 from ..utils.compile import CUDAGraphed
@@ -29,11 +31,11 @@ logger = logging.getLogger(__name__)
 
 
 class ScaledEmbedding(nn.Embedding):
-    """Boost learning rate for embeddings (with `scale`).
-
-    Args:
-        norm (bool): if True, uses a layer norm after the embedding.
-        zero_idx (int): special value indicating that the output should be exactly 0.
+    """带有缩放学习率的嵌入层。
+    
+    参数:
+        norm (bool): 如果为True,在嵌入后使用层归一化。
+        zero_idx (int): 表示输出应该完全为0的特殊值。
     """
 
     def __init__(self, *args, norm: bool = False, zero_idx: int = -1, **kwargs):
@@ -41,42 +43,43 @@ class ScaledEmbedding(nn.Embedding):
         self.norm = None
         if norm:
             self.norm = create_norm_fn("layer_norm", self.embedding_dim)
-        assert zero_idx < 0, "Please use negative values for the zero_idx."
+        assert zero_idx < 0, "请使用负值作为zero_idx。"
         self.zero_idx = zero_idx
 
     def forward(self, input, *args, **kwargs):
+        # 检查输入是否为zero_idx
         is_zero = input == self.zero_idx
         zero = torch.zeros(1, dtype=input.dtype, device=input.device)
+        # 将输入限制在非负范围内
         input = input.clamp(min=0)
         y = super().forward(input, *args, **kwargs)
         if self.norm is not None:
             y = self.norm(y)
+        # 对于zero_idx,输出为0
         y = torch.where(is_zero[..., None], zero, y)
         return y
 
 
 class LMModel(StreamingContainer):
-    """Transformer-based language model on multiple streams of codes.
+    """基于Transformer的多流代码语言模型。
 
-    Args:
-        n_q (int): Number of parallel streams to model as input.
-        dep_q (int): Number of parallel streams to model in the depformer.
-        card (int): Cardinality, vocabulary size.
-        text_card (int): Cardinality of the text vocabulary.
-        dim (int): Dimension of the transformer encoder.
-        num_heads (int): Number of heads for the transformer encoder.
-        hidden_scale (int): Scale for hidden feed forward dimension of the transformer encoder.
-        norm (str): Normalization method.
-        norm_emb (bool): Whether to normalize embeddings.
-        bias_proj (bool): Use bias for output projections.
-        depformer_*: params used for the Depformer Transformer, all the other will be shared.
-        depformer_multi_linear (bool): if True, uses one linear layer per codebook to project the
-            output of the main transformer to the Depformer latent space.
-        depformer_dim_feedforward (int| list[int]| None): If None, defaults to hidden_scale * depformer_dim.
-        existing_text_padding_id (bool): if True, will use a different token for the initial text token, and
-            the text padding token.
-        same_initial (bool): if True, uses the same initial tokens for both text and audio mode.
-        **kwargs: Additional parameters for the transformer encoder.
+    主要参数:
+        n_q (int): 输入的并行流数量。
+        dep_q (int): depformer中建模的并行流数量。
+        card (int): 词汇表大小。
+        text_card (int): 文本词汇表大小。
+        dim (int): Transformer编码器的维度。
+        num_heads (int): Transformer编码器的注意力头数。
+        hidden_scale (int): Transformer编码器前馈网络隐藏层的缩放因子。
+        norm (str): 归一化方法。
+        norm_emb (bool): 是否对嵌入进行归一化。
+        bias_proj (bool): 输出投影是否使用偏置。
+        depformer_*: 用于Depformer Transformer的参数。
+        depformer_multi_linear (bool): 如果为True,使用每个codebook一个线性层将主transformer的输出投影到Depformer潜在空间。
+        depformer_dim_feedforward (int| list[int]| None): 如果为None,默认为hidden_scale * depformer_dim。
+        existing_text_padding_id (bool): 如果为True,将使用不同的token作为初始文本token和文本填充token。
+        same_initial (bool): 如果为True,使用相同的初始token作为文本和音频模式。
+        **kwargs: Transformer编码器的其他参数。
     """
 
     def __init__(
@@ -114,6 +117,7 @@ class LMModel(StreamingContainer):
         self.existing_text_padding_id = existing_text_padding_id
         self.context = context
         kwargs["context"] = context
+        # 创建嵌入层
         EmbeddingFactory = partial(
             ScaledEmbedding,
             norm=norm_emb,
@@ -186,6 +190,9 @@ class LMModel(StreamingContainer):
         self.linears = nn.ModuleList(
             [nn.Linear(dim, self.card, bias=bias_proj) for _ in range(dep_q)]
         )
+
+        # 添加一个属性用于控制 torchviz 可视化
+        self.visualize_torchviz = False
 
     @property
     def initial_token_id(self) -> int:
@@ -261,6 +268,15 @@ class LMModel(StreamingContainer):
         self,
         sequence: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        处理输入序列,返回transformer输出和文本logits。
+        
+        参数:
+            sequence (torch.Tensor): 输入序列,形状为 [B, K, S]
+        
+        返回:
+            tuple[torch.Tensor, torch.Tensor]: transformer输出和文本logits
+        """
         B, K, S = sequence.shape
         assert (
             K == self.num_codebooks
@@ -281,6 +297,16 @@ class LMModel(StreamingContainer):
         assert isinstance(transformer_out, torch.Tensor)
         text_logits = self.text_linear(transformer_out)
         text_logits = text_logits[:, None]
+
+        # 集成 torchviz
+        if self.visualize_torchviz:
+            dot = make_dot(text_logits, params=dict(self.named_parameters()))
+            dot.format = 'png'
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # 生成时间戳
+            output_path = f'moshi_computational_graph_{timestamp}.png'  # 添加时间戳到文件名
+            dot.render(output_path, cleanup=True)
+            logger.info(f"计算图已保存至 {output_path}")
+
         return transformer_out, text_logits
 
     def forward_depformer(
@@ -289,6 +315,17 @@ class LMModel(StreamingContainer):
         sequence: torch.Tensor,
         transformer_out: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Depformer的前向传播。
+        
+        参数:
+            depformer_cb_index (int): 当前处理的codebook索引
+            sequence (torch.Tensor): 输入序列
+            transformer_out (torch.Tensor): 主transformer的输出
+        
+        返回:
+            torch.Tensor: Depformer的输出logits
+        """
         B, K, S = sequence.shape
         assert (
             K == 1
@@ -335,6 +372,15 @@ class _LMGenState:
 
 
 class LMGen(StreamingModule[_LMGenState]):
+    """
+    用于生成的LM模型。
+    
+    主要功能:
+    - 初始化生成状态
+    - 执行单步生成
+    - 处理Depformer的生成步骤
+    """
+
     def __init__(
         self,
         lm_model: LMModel,
@@ -363,6 +409,7 @@ class LMGen(StreamingModule[_LMGenState]):
         )
 
     def _init_streaming_state(self, batch_size: int) -> _LMGenState:
+        """初始化流式生成状态"""
         lm_model = self.lm_model
         initial = lm_model._get_initial_token()
         cache = torch.full(
@@ -380,6 +427,7 @@ class LMGen(StreamingModule[_LMGenState]):
 
     @torch.no_grad()
     def step(self, input_tokens: torch.Tensor) -> torch.Tensor | None:
+        """执行单步生成"""
         state = self._streaming_state
         if state is None:
             raise RuntimeError(
@@ -459,6 +507,7 @@ class LMGen(StreamingModule[_LMGenState]):
         text_token: torch.Tensor,
         transformer_out: torch.Tensor,
     ) -> torch.Tensor:
+        """执行Depformer的生成步骤"""
         (B,) = text_token.shape
         prev_token = text_token
         lm_model = self.lm_model
