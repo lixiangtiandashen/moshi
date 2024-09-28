@@ -287,7 +287,7 @@ class LMModel(StreamingContainer):
             indices = input_sequence[:, cb_index + self.audio_offset]
             
             # 确认 indices 的数据类型
-            if not torch.is_integral(indices):
+            if not torch.is_integer(indices):
                 raise TypeError(f"Indices dtype must be integral, got {indices.dtype}")
             
             # 确认 indices 的值在合法范围内
