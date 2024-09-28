@@ -299,7 +299,7 @@ class LMModel(StreamingContainer):
         text_logits = text_logits[:, None]
 
         # 集成 torchviz
-        if self.visualize_torchviz:
+        if self.visualize_torchviz and not torch.jit.is_tracing():
             dot = make_dot(text_logits, params=dict(self.named_parameters()))
             dot.format = 'png'
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # 生成时间戳

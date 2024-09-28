@@ -260,7 +260,7 @@ def main():
         vocab_size = text_tokenizer.get_piece_size()
         log("info", f"词汇表大小: {vocab_size}")
         dummy_input = torch.randint(
-            0, vocab_size, (1, num_codebooks, 1920), dtype=torch.long
+            0, vocab_size, (1, num_codebooks, 1), dtype=torch.long
         ).to(args.device)
         writer.add_graph(lm, dummy_input)
         writer.flush()
