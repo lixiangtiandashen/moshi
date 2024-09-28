@@ -252,8 +252,11 @@ def main():
     if args.enable_tensorboard:
         writer = SummaryWriter(log_dir=args.tensorboard_logdir)
         log("info", f"TensorBoard 已启用，日志路径: {args.tensorboard_logdir}")
-        # 将模型结构写入 TensorBoard
-        dummy_input = torch.randn(1, 8, 1920).to(args.device)
+
+        # 动态获取 num_codebooks 并生成 dummy_input
+        num_codebooks = lm.num_codebooks  # 动态获取 num_codebooks
+        log("info", f"模型的 num_codebooks: {num_codebooks}")
+        dummy_input = torch.randn(1, num_codebooks, 1920).to(args.device)
         writer.add_graph(lm, dummy_input)
         writer.flush()
 
