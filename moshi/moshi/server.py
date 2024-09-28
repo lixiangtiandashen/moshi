@@ -139,7 +139,7 @@ class ServerState:
                         text_token = tokens[0, 0, 0].item()
                         if text_token not in (0, 3):
                             _text = self.text_tokenizer.id_to_piece(text_token)  # type: ignore
-                            _text = _text.replace("▁", " ")
+                            _text = _text.replace(" ", " ")
                             msg = b"\x02" + bytes(_text, encoding="utf8")
                             log("info", f"text token '{_text}'")
                             await ws.send_bytes(msg)
@@ -256,11 +256,18 @@ def main():
         # 动态获取 num_codebooks 并生成 dummy_input
         num_codebooks = lm.num_codebooks  # 动态获取 num_codebooks
         log("info", f"模型的 num_codebooks: {num_codebooks}")
-        # 获取词汇表大小
-        vocab_size = text_tokenizer.get_piece_size()
-        log("info", f"词汇表大小: {vocab_size}")
+
+        # 获取模型的实际 vocab_size
+        vocab_size = lm.text_emb.num_embeddings
+        log("info", f"模型的词汇表大小 (vocab_size): {vocab_size}")
+
+        # 如果有多个嵌入层，确保索引不超过最小的 vocab_size
+        min_vocab_size = min([emb.num_embeddings for emb in lm.emb]) if hasattr(lm, 'emb') else vocab_size
+        log("info", f"所有音频嵌入层中的最小 vocab_size: {min_vocab_size}")
+
+        # 生成 dummy_input，设置序列长度 S 为 1 以减少GPU内存占用
         dummy_input = torch.randint(
-            0, vocab_size, (1, num_codebooks, 1), dtype=torch.long
+            0, min_vocab_size, (1, num_codebooks, 1), dtype=torch.long
         ).to(args.device)
         writer.add_graph(lm, dummy_input)
         writer.flush()

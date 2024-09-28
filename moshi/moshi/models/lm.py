@@ -269,25 +269,35 @@ class LMModel(StreamingContainer):
         sequence: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        处理输入序列,返回transformer输出和文本logits。
+        处理输入序列,返回 transformer 输出和文本 logits。
         
         参数:
             sequence (torch.Tensor): 输入序列,形状为 [B, K, S]
         
         返回:
-            tuple[torch.Tensor, torch.Tensor]: transformer输出和文本logits
+            tuple[torch.Tensor, torch.Tensor]: transformer 输出和文本 logits
         """
         B, K, S = sequence.shape
-        assert (
-            K == self.num_codebooks
-        ), f"Sequence shape {sequence.shape} must match the number of codebooks."
+        if K != self.num_codebooks:
+            raise ValueError(f"Sequence shape {sequence.shape} must match the number of codebooks ({self.num_codebooks}).")
+
         input_sequence = sequence
         input_ = None
         for cb_index in range(self.num_audio_codebooks):
-            audio_emb = self.emb[cb_index](
-                input_sequence[:, cb_index + self.audio_offset]
-            )
+            indices = input_sequence[:, cb_index + self.audio_offset]
+            
+            # 确认 indices 的数据类型
+            if not torch.is_integral(indices):
+                raise TypeError(f"Indices dtype must be integral, got {indices.dtype}")
+            
+            # 确认 indices 的值在合法范围内
+            max_index = indices.max().item()
+            if max_index >= self.emb[cb_index].num_embeddings:
+                raise ValueError(f"Some indices are out of the embedding layer's range. Max index: {max_index}, vocab_size: {self.emb[cb_index].num_embeddings}")
+            
+            audio_emb = self.emb[cb_index](indices)
             input_ = audio_emb if input_ is None else input_ + audio_emb
+
         text_emb = self.text_emb(input_sequence[:, 0])
         input_ = text_emb if input_ is None else input_ + text_emb
         transformer_out = self.transformer(input_)
@@ -298,7 +308,7 @@ class LMModel(StreamingContainer):
         text_logits = self.text_linear(transformer_out)
         text_logits = text_logits[:, None]
 
-        # 集成 torchviz
+        # 集成 torchviz，仅在非追踪模式下执行
         if self.visualize_torchviz and not torch.jit.is_tracing():
             dot = make_dot(text_logits, params=dict(self.named_parameters()))
             dot.format = 'png'
