@@ -256,7 +256,12 @@ def main():
         # 动态获取 num_codebooks 并生成 dummy_input
         num_codebooks = lm.num_codebooks  # 动态获取 num_codebooks
         log("info", f"模型的 num_codebooks: {num_codebooks}")
-        dummy_input = torch.randn(1, num_codebooks, 1920).to(args.device)
+        # 获取词汇表大小
+        vocab_size = text_tokenizer.get_piece_size()
+        log("info", f"词汇表大小: {vocab_size}")
+        dummy_input = torch.randint(
+            0, vocab_size, (1, num_codebooks, 1920), dtype=torch.long
+        ).to(args.device)
         writer.add_graph(lm, dummy_input)
         writer.flush()
 
