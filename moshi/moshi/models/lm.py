@@ -283,10 +283,12 @@ class LMModel(StreamingContainer):
         ), f"Sequence shape {sequence.shape} must match the number of codebooks."
         input_sequence = sequence
         input_ = None
+        audio_embeddings = []
         for cb_index in range(self.num_audio_codebooks):
             audio_emb = self.emb[cb_index](
                 input_sequence[:, cb_index + self.audio_offset]
             )
+            audio_embeddings.append(audio_emb)
             input_ = audio_emb if input_ is None else input_ + audio_emb
         text_emb = self.text_emb(input_sequence[:, 0])
         input_ = text_emb if input_ is None else input_ + text_emb
@@ -298,14 +300,28 @@ class LMModel(StreamingContainer):
         text_logits = self.text_linear(transformer_out)
         text_logits = text_logits[:, None]
 
-        # 集成 torchviz，仅在非追踪模式下执行
-        if self.visualize_torchviz: # and not torch.jit.is_tracing():
-            dot = make_dot(text_logits, params=dict(self.named_parameters()))
-            dot.format = 'png'
+        # 收集更多中间层的输出
+        intermediate_outputs = {
+            "audio_embeddings": audio_embeddings,
+            "text_embedding": text_emb,
+            "transformer_output": transformer_out,
+            "text_logits": text_logits,
+        }
+
+        # 集成 torchviz
+        if self.visualize_torchviz:
+            # 将所有中间输出合并为一个元组
+            dot = make_dot(
+                (transformer_out, text_logits),
+                params=dict(self.named_parameters()),
+                show_attrs=True,
+                show_saved=True,
+            )
+            dot.format = 'svg'
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # 生成时间戳
-            output_path = f'moshi_computational_graph_{timestamp}.png'  # 添加时间戳到文件名
+            output_path = f'moshi_computational_graph_{timestamp}'  # 添加时间戳到文件名
             dot.render(output_path, cleanup=True)
-            logger.info(f"计算图已保存至 {output_path}")
+            logger.info(f"计算图已保存至 {output_path}.svg")
 
         return transformer_out, text_logits
 
