@@ -194,6 +194,40 @@ class LMModel(StreamingContainer):
         # 添加一个属性用于控制 torchviz 可视化
         self.visualize_torchviz = False
 
+        # 初始化一个字典来存储激活
+        self.activations = {}
+
+    def _get_activation(self, name):
+        def hook(model, input, output):
+            self.activations[name] = output
+        return hook
+
+    def register_hooks(self):
+        """注册前向钩子到感兴趣的层"""
+        # 注册 transformer 和 text_linear 的钩子
+        self.transformer.register_forward_hook(self._get_activation('transformer'))
+        self.text_linear.register_forward_hook(self._get_activation('text_linear'))
+        # 根据需要，添加更多层的钩子
+        # 注册每个嵌入层的钩子
+        for idx, emb in enumerate(self.emb):
+            emb.register_forward_hook(self._get_activation(f'emb_{idx}'))
+        self.text_emb.register_forward_hook(self._get_activation('text_emb'))
+
+    def remove_hooks(self):
+        """移除所有前向钩子"""
+        hooks = list(self.transformer._forward_hooks.keys()) + \
+                list(self.text_linear._forward_hooks.keys()) + \
+                [f'emb_{idx}' for idx in range(len(self.emb))] + \
+                ['text_emb']
+        for name in hooks:
+            if hasattr(self, name) and name in self.transformer._forward_hooks:
+                self.transformer._forward_hooks.pop(name, None)
+            if hasattr(self, name) and name in self.text_linear._forward_hooks:
+                self.text_linear._forward_hooks.pop(name, None)
+            for idx in range(len(self.emb)):
+                self.emb[idx]._forward_hooks.pop(f'emb_{idx}', None)
+            self.text_emb._forward_hooks.pop('text_emb', None)
+
     @property
     def initial_token_id(self) -> int:
         """Token id for the start of sequence (audio)."""
@@ -277,18 +311,19 @@ class LMModel(StreamingContainer):
         返回:
             tuple[torch.Tensor, torch.Tensor]: transformer 输出和文本 logits
         """
+        if self.visualize_torchviz:
+            self.register_hooks()
+
         B, K, S = sequence.shape
         assert (
             K == self.num_codebooks
         ), f"Sequence shape {sequence.shape} must match the number of codebooks."
         input_sequence = sequence
         input_ = None
-        audio_embeddings = []
         for cb_index in range(self.num_audio_codebooks):
             audio_emb = self.emb[cb_index](
                 input_sequence[:, cb_index + self.audio_offset]
             )
-            audio_embeddings.append(audio_emb)
             input_ = audio_emb if input_ is None else input_ + audio_emb
         text_emb = self.text_emb(input_sequence[:, 0])
         input_ = text_emb if input_ is None else input_ + text_emb
@@ -300,19 +335,13 @@ class LMModel(StreamingContainer):
         text_logits = self.text_linear(transformer_out)
         text_logits = text_logits[:, None]
 
-        # 收集更多中间层的输出
-        intermediate_outputs = {
-            "audio_embeddings": audio_embeddings,
-            "text_embedding": text_emb,
-            "transformer_output": transformer_out,
-            "text_logits": text_logits,
-        }
-
         # 集成 torchviz
         if self.visualize_torchviz:
-            # 将所有中间输出合并为一个元组
+            # 将所有激活的输出合并为一个元组
+            outputs_tuple = tuple(self.activations.values())
+            outputs_tuple += (transformer_out, text_logits)
             dot = make_dot(
-                (transformer_out, text_logits),
+                outputs_tuple,
                 params=dict(self.named_parameters()),
                 show_attrs=True,
                 show_saved=True,
@@ -322,6 +351,8 @@ class LMModel(StreamingContainer):
             output_path = f'moshi_computational_graph_{timestamp}'  # 添加时间戳到文件名
             dot.render(output_path, cleanup=True)
             logger.info(f"计算图已保存至 {output_path}.svg")
+
+            self.remove_hooks()
 
         return transformer_out, text_logits
 
