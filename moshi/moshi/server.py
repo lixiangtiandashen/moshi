@@ -326,6 +326,6 @@ def main():
     if writer is not None:
         writer.close()
 
-if __name__ == "__main__":
-    with torch.no_grad():
-        main()
+
+with torch.no_grad():
+    main()
