@@ -278,26 +278,16 @@ class LMModel(StreamingContainer):
             tuple[torch.Tensor, torch.Tensor]: transformer 输出和文本 logits
         """
         B, K, S = sequence.shape
-        if K != self.num_codebooks:
-            raise ValueError(f"Sequence shape {sequence.shape} must match the number of codebooks ({self.num_codebooks}).")
-
+        assert (
+            K == self.num_codebooks
+        ), f"Sequence shape {sequence.shape} must match the number of codebooks."
         input_sequence = sequence
         input_ = None
         for cb_index in range(self.num_audio_codebooks):
-            indices = input_sequence[:, cb_index + self.audio_offset]
-            
-            # 确认 indices 的数据类型
-            if not torch.is_integer(indices):
-                raise TypeError(f"Indices dtype must be integral, got {indices.dtype}")
-            
-            # 确认 indices 的值在合法范围内
-            max_index = indices.max().item()
-            if max_index >= self.emb[cb_index].num_embeddings:
-                raise ValueError(f"Some indices are out of the embedding layer's range. Max index: {max_index}, vocab_size: {self.emb[cb_index].num_embeddings}")
-            
-            audio_emb = self.emb[cb_index](indices)
+            audio_emb = self.emb[cb_index](
+                input_sequence[:, cb_index + self.audio_offset]
+            )
             input_ = audio_emb if input_ is None else input_ + audio_emb
-
         text_emb = self.text_emb(input_sequence[:, 0])
         input_ = text_emb if input_ is None else input_ + text_emb
         transformer_out = self.transformer(input_)
