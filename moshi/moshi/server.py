@@ -275,12 +275,15 @@ def main():
         torch._dynamo.config.verbose = False
         torch._dynamo.reset()
 
-        writer.add_graph(lm, dummy_input)
-        writer.flush()
-
-        # 恢复 TorchDynamo 优化
-        torch._dynamo.config.suppress_errors = False
-        torch._dynamo.config.verbose = True
+        try:
+            writer.add_graph(lm, dummy_input)
+            writer.flush()
+        except Exception as e:
+            log("error", f"添加模型图时发生错误: {str(e)}")
+        finally:
+            # 恢复 TorchDynamo 优化 
+            torch._dynamo.config.suppress_errors = False
+            torch._dynamo.config.verbose = True
 
     # 设置 torchviz 开关
     if args.enable_torchviz:
