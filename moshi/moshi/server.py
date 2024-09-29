@@ -269,8 +269,19 @@ def main():
         dummy_input = torch.randint(
             0, min_vocab_size, (1, num_codebooks, 1), dtype=torch.long
         ).to(args.device)
+
+        # 临时禁用 TorchDynamo 优化
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        torch._dynamo.config.verbose = False
+        torch._dynamo.reset()
+
         writer.add_graph(lm, dummy_input)
         writer.flush()
+
+        # 恢复 TorchDynamo 优化
+        torch._dynamo.config.suppress_errors = False
+        torch._dynamo.config.verbose = True
 
     # 设置 torchviz 开关
     if args.enable_torchviz:
