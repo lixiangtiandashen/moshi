@@ -271,7 +271,6 @@ def main():
         ).to(args.device)
 
         # 临时禁用 TorchDynamo 优化
-        import torch._dynamo
         torch._dynamo.config.suppress_errors = True
         torch._dynamo.config.verbose = False
         torch._dynamo.reset()
