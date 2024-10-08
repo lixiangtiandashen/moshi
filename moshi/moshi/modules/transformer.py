@@ -242,7 +242,10 @@ class RingKVCache:
     def complete(self, k: torch.Tensor, v: torch.Tensor) -> KVCacheResult:
         assert k.shape[:-1] == v.shape[:-1], (k.shape, v.shape)
         B, H, T, D = k.shape
-        indexes = torch.arange(T, device=self.end_offset.device, dtype=self.end_offset.dtype) + self.end_offset
+        indexes = (
+            torch.arange(T, device=self.end_offset.device, dtype=self.end_offset.dtype)
+            + self.end_offset
+        )
         indexes = indexes % self.capacity
         self.cache[0].index_copy_(2, indexes, k)
         self.cache[1].index_copy_(2, indexes, v)
@@ -582,7 +585,7 @@ class StreamingTransformerLayer(StreamingModule[_LayerState]):
 
     def forward(self, x: torch.Tensor):
         with ExitStack() as stack:
-            if x.device.type != 'cuda':
+            if x.device.type != "cuda":
                 stack.enter_context(no_compile())
             x = self._sa_block(x)
             x = self._ff_block(x)

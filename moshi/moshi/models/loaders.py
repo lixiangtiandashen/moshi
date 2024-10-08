@@ -12,6 +12,10 @@ from .lm import LMModel
 from ..modules import SEANetEncoder, SEANetDecoder, transformer
 from ..quantization import SplitResidualVectorQuantizer
 
+from ..modules.transformer import StreamingTransformerLayer
+import bitsandbytes as bnb
+from torch import nn
+
 SAMPLE_RATE = 24000
 FRAME_RATE = 12.5
 
@@ -139,15 +143,109 @@ def get_mimi(filename: str | Path,
     return model
 
 
-def get_moshi_lm(filename: str | Path,
-                 device: torch.device | str = 'cpu') -> LMModel:
+# def get_moshi_lm(filename: str | Path,
+#                  device: torch.device | str = 'cpu') -> LMModel:
+#     dtype = torch.bfloat16
+#     model = LMModel(
+#         device=device,
+#         dtype=dtype,
+#         **_lm_kwargs,
+#     ).to(device=device, dtype=dtype)
+#     model.eval()
+#     if _is_safetensors(filename):
+#         load_model(model, filename)
+#     else:
+#         pkg = torch.load(
+#             filename,
+#             "cpu",
+#         )
+#         model.load_state_dict(pkg["fsdp_best_state"]["model"])
+#     return model
+
+
+class QuantizedStreamingTransformerLayer(StreamingTransformerLayer):
+    """量化后的 StreamingTransformerLayer，使用 bitsandbytes 的 Linear8bitLt 进行线性层量化。
+
+    根据 gating 是否启用，分别量化不同的线性层。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.device = next(self.parameters()).device  # 获取当前设备
+
+        if self.gating is None:
+            self._quantize_linear_layers()
+        else:
+            self._quantize_gating_layers()
+
+    def _quantize_linear_layers(self):
+        """量化 linear1 和 linear2 层"""
+        for attr in ["linear1", "linear2"]:
+            linear = getattr(self, attr)
+            if linear is not None:
+                setattr(self, attr, self._quantize_layer(linear, attr))
+
+    def _quantize_gating_layers(self):
+        """量化 gating 模块中的线性层"""
+        if isinstance(self.gating, nn.ModuleList):
+            for i, gating_module in enumerate(self.gating):
+                self._quantize_single_gating(gating_module, f"ModuleList[{i}]")
+        else:
+            self._quantize_single_gating(self.gating, "Single")
+
+    def _quantize_single_gating(self, gating_module, module_name):
+        """量化单个 gating 模块"""
+        for attr in ["linear_in", "linear_out"]:
+            if hasattr(gating_module, attr):
+                linear = getattr(gating_module, attr)
+                setattr(gating_module, attr, self._quantize_layer(linear, f"Gating {module_name}: {attr}"))
+            else:
+                print(f"Gating {module_name}: 未找到 {attr}，跳过量化。")
+
+    def _quantize_layer(self, linear, layer_name):
+        """将给定的线性层量化为 Linear8bitLt"""
+        quantized_linear = bnb.nn.Linear8bitLt(
+            input_features=linear.in_features,
+            output_features=linear.out_features,
+            bias=linear.bias is not None,
+            has_fp16_weights=False,  # 权重已转换为 float32
+            threshold=6.0,
+            index=True,
+            device=self.device,
+        )
+        # 转换权重为 float32，因为bitsandbytes不支持bf16
+        if linear.weight.dtype == torch.bfloat16:   
+            quantized_linear.weight.data = linear.weight.data.to(dtype=torch.float32)
+        else:
+            quantized_linear.weight.data = linear.weight.data
+        if linear.bias is not None:
+            if linear.bias.dtype == torch.bfloat16:
+                quantized_linear.bias.data = linear.bias.data.to(dtype=torch.float32)
+            else:
+                quantized_linear.bias.data = linear.bias.data
+        # quantized_linear = quantized_linear.to(self.device)
+        # print(f"{layer_name} 已成功量化为 Linear8bitLt。")
+        
+        # 删除原始线性层
+        del linear
+        torch.cuda.empty_cache()
+        
+        return quantized_linear
+
+
+def get_moshi_lm(filename: str | Path, device: torch.device | str = "cpu") -> LMModel:
     dtype = torch.bfloat16
+
+    lm_kwargs = _lm_kwargs.copy()
+    lm_kwargs["layer_class"] = QuantizedStreamingTransformerLayer
+
     model = LMModel(
-        device=device,
+        device='cpu',
         dtype=dtype,
-        **_lm_kwargs,
-    ).to(device=device, dtype=dtype)
-    model.eval()
+        **lm_kwargs,
+    )
+
+    # 加载模型权重
     if _is_safetensors(filename):
         load_model(model, filename)
     else:
@@ -156,4 +254,19 @@ def get_moshi_lm(filename: str | Path,
             "cpu",
         )
         model.load_state_dict(pkg["fsdp_best_state"]["model"])
+    
+    # 将模型移动到指定设备并设置数据类型，触发量化
+    model.to(device=device)
+    
+    # 设置为评估模式
+    model.eval()
+
+    # 清理梯度
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # 清理 CUDA 缓存
+    torch.cuda.empty_cache()
+    
     return model
+
