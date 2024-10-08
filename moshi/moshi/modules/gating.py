@@ -9,15 +9,31 @@ from torch.nn import functional as F
 from ..utils.compile import torch_compile_lazy
 
 
+# @torch_compile_lazy
+# def gating_forward_kernel(
+#     weight_in: torch.Tensor, weight_out: torch.Tensor, activation, x: torch.Tensor
+# ):
+#     x = F.linear(x, weight_in)
+#     B, T, _ = x.shape
+#     x = x.view(B, T, 2, -1)
+#     x = activation(x[..., 0, :]) * x[..., 1, :]
+#     x = F.linear(x, weight_out)
+#     return x
+from bitsandbytes.optim import Linear8bitLt
+
+
 @torch_compile_lazy
 def gating_forward_kernel(
-    weight_in: torch.Tensor, weight_out: torch.Tensor, activation, x: torch.Tensor
+    linear_in: Linear8bitLt,  # 使用 bitsandbytes 的线性层
+    linear_out: Linear8bitLt,
+    activation,
+    x: torch.Tensor,
 ):
-    x = F.linear(x, weight_in)
+    x = linear_in(x)  # 自动解量化
     B, T, _ = x.shape
     x = x.view(B, T, 2, -1)
     x = activation(x[..., 0, :]) * x[..., 1, :]
-    x = F.linear(x, weight_out)
+    x = linear_out(x)  # 自动解量化
     return x
 
 
@@ -46,8 +62,11 @@ class ActivationGating(nn.Module):
         self.activation = activation
 
     def forward(self, x: torch.Tensor):
+        # return gating_forward_kernel(
+        #     self.linear_in.weight, self.linear_out.weight, self.activation, x
+        # )
         return gating_forward_kernel(
-            self.linear_in.weight, self.linear_out.weight, self.activation, x
+            self.linear_in, self.linear_out, self.activation, x
         )
 
 
