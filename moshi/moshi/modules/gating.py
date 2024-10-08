@@ -19,7 +19,7 @@ from ..utils.compile import torch_compile_lazy
 #     x = activation(x[..., 0, :]) * x[..., 1, :]
 #     x = F.linear(x, weight_out)
 #     return x
-from bitsandbytes.optim import Linear8bitLt
+from bitsandbytes.nn import Linear8bitLt
 
 
 @torch_compile_lazy
