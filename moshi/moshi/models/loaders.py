@@ -256,7 +256,8 @@ def get_moshi_lm(filename: str | Path, device: torch.device | str = "cpu") -> LM
         model.load_state_dict(pkg["fsdp_best_state"]["model"])
     
     # 将模型移动到指定设备并设置数据类型，触发量化
-    model.to(device=device)
+    model.to(device=device, dtype=dtype)
+    print(f"模型已移动到 {device} 设备。自动触发bitsandbytes量化。")
     
     # 设置为评估模式
     model.eval()
