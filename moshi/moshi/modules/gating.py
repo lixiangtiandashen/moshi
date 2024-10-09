@@ -19,22 +19,6 @@ from ..utils.compile import torch_compile_lazy
 #     x = activation(x[..., 0, :]) * x[..., 1, :]
 #     x = F.linear(x, weight_out)
 #     return x
-from bitsandbytes.nn import Linear8bitLt
-
-
-@torch_compile_lazy
-def gating_forward_kernel(
-    linear_in: Linear8bitLt,  # 使用 bitsandbytes 的线性层
-    linear_out: Linear8bitLt,
-    activation,
-    x: torch.Tensor,
-):
-    x = linear_in(x)  # 自动解量化
-    B, T, _ = x.shape
-    x = x.view(B, T, 2, -1)
-    x = activation(x[..., 0, :]) * x[..., 1, :]
-    x = linear_out(x)  # 自动解量化
-    return x
 
 
 class ActivationGating(nn.Module):
@@ -65,10 +49,12 @@ class ActivationGating(nn.Module):
         # return gating_forward_kernel(
         #     self.linear_in.weight, self.linear_out.weight, self.activation, x
         # )
-        return gating_forward_kernel(
-            self.linear_in, self.linear_out, self.activation, x
-        )
-
+        x = self.linear_in(x)  # 自动解量化
+        B, T, _ = x.shape
+        x = x.view(B, T, 2, -1)
+        x = self.activation(x[..., 0, :]) * x[..., 1, :]
+        x = self.linear_out(x)  # 自动解量化
+        return x
 
 def _get_activation(name: str):
     if name in ["sigmoid", "tanh", "relu"]:
